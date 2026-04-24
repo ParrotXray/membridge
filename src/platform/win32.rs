@@ -16,8 +16,8 @@ use crate::error::ShmError;
 /// stripped internally before passing to Win32 APIs.
 pub struct PlatformHandle {
     handle: HANDLE,
-    size: usize,
-    name: String,
+    size:   usize,
+    name:   String,
 }
 
 // SAFETY: `HANDLE` is a Win32 kernel object reference that is valid to move
@@ -86,9 +86,7 @@ impl PlatformHandle {
         };
 
         if addr.Value.is_null() {
-            let err = windows::core::Error::from_hresult(
-                windows::Win32::Foundation::HRESULT::from_thread()
-            );
+            let err = windows::core::Error::from_thread();
             return Err(ShmError::Os(err.to_string()));
         }
 
