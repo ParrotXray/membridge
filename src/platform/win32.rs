@@ -10,20 +10,17 @@ use windows::Win32::System::Memory::{
 
 use crate::error::ShmError;
 
-/// Win32 shared memory handle (`CreateFileMapping` + `MapViewOfFile`).
+/// Win32 shared memory handle (`CreateFileMappingA` + `MapViewOfFile`).
 ///
-/// The segment name is stored as-is; Windows does not require a leading `/`.
-/// However, to remain compatible with the cross-platform `validate_name` check
-/// in `SharedMemory`, names must still start with `/` — the leading `/` is
-/// stripped internally when passing to Win32 APIs (which use plain names in
-/// the `Global\` or `Local\` namespace).
+/// The segment name is stored with its original leading `'/'`; the slash is
+/// stripped internally before passing to Win32 APIs.
 pub struct PlatformHandle {
     handle: HANDLE,
-    size:   usize,
-    name:   String,
+    size: usize,
+    name: String,
 }
 
-// SAFETY: `HANDLE` is a Win32 kernel object reference; it is valid to move
+// SAFETY: `HANDLE` is a Win32 kernel object reference that is valid to move
 // across threads as long as it is not used concurrently without synchronisation.
 unsafe impl Send for PlatformHandle {}
 unsafe impl Sync for PlatformHandle {}
@@ -32,12 +29,14 @@ impl PlatformHandle {
     /// Creates a new named segment via `CreateFileMappingA`.
     pub fn create(name: &str, size: usize) -> Result<Self, ShmError> {
         let win_name = to_win32_name(name);
-        let c_name   = std::ffi::CString::new(win_name.clone())
+        let c_name = std::ffi::CString::new(win_name)
             .map_err(|e| ShmError::InvalidArg(e.to_string()))?;
 
         let high = (size >> 32) as u32;
         let low  = (size & 0xFFFF_FFFF) as u32;
 
+        // SAFETY: all arguments are valid; c_name lives for the duration of
+        // the call.
         let handle = unsafe {
             CreateFileMappingA(
                 INVALID_HANDLE_VALUE,
@@ -46,7 +45,7 @@ impl PlatformHandle {
                 high,
                 low,
                 PCSTR(c_name.as_ptr() as *const u8),
-            ).map_err(|e| ShmError::Os(e.to_string()))?
+            ).map_err(|e: windows::core::Error| ShmError::Os(e.to_string()))?
         };
 
         Ok(PlatformHandle { handle, size, name: name.to_string() })
@@ -55,18 +54,19 @@ impl PlatformHandle {
     /// Opens an existing named segment via `OpenFileMappingA`.
     ///
     /// `size` must match the value used at creation time — Win32 does not
-    /// expose the segment size through the mapping handle itself.
+    /// expose the segment size through the mapping handle.
     pub fn open(name: &str, size: usize) -> Result<Self, ShmError> {
         let win_name = to_win32_name(name);
-        let c_name   = std::ffi::CString::new(win_name)
+        let c_name = std::ffi::CString::new(win_name)
             .map_err(|e| ShmError::InvalidArg(e.to_string()))?;
 
+        // SAFETY: c_name is a valid null-terminated string.
         let handle = unsafe {
             OpenFileMappingA(
                 FILE_MAP_ALL_ACCESS.0,
                 false,
                 PCSTR(c_name.as_ptr() as *const u8),
-            ).map_err(|e| ShmError::Os(e.to_string()))?
+            ).map_err(|e: windows::core::Error| ShmError::Os(e.to_string()))?
         };
 
         Ok(PlatformHandle { handle, size, name: name.to_string() })
@@ -80,14 +80,16 @@ impl PlatformHandle {
 
     /// Maps the segment via `MapViewOfFile` and returns a raw pointer.
     pub fn map(&self) -> Result<NonNull<u8>, ShmError> {
+        // SAFETY: `self.handle` is a valid open mapping handle.
         let addr = unsafe {
             MapViewOfFile(self.handle, FILE_MAP_ALL_ACCESS, 0, 0, self.size)
         };
 
         if addr.Value.is_null() {
-            return Err(ShmError::Os(
-                windows::core::Error::from_win32().to_string()
-            ));
+            let err = windows::core::Error::from_hresult(
+                windows::Win32::Foundation::HRESULT::from_thread()
+            );
+            return Err(ShmError::Os(err.to_string()));
         }
 
         NonNull::new(addr.Value as *mut u8)
@@ -102,7 +104,8 @@ impl PlatformHandle {
     /// handle and must not have been unmapped already.
     pub unsafe fn unmap(ptr: NonNull<u8>, _size: usize) {
         let addr = MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr.as_ptr() as *mut _ };
-        let _ = UnmapViewOfFile(addr);
+        // SAFETY: caller guarantees ptr is a valid mapped address.
+        unsafe { let _ = UnmapViewOfFile(addr); }
     }
 
     /// Returns the total segment size in bytes.
@@ -110,7 +113,7 @@ impl PlatformHandle {
         self.size
     }
 
-    /// Returns the segment name (with the original leading `/`).
+    /// Returns the segment name (with the original leading `'/'`).
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -118,15 +121,15 @@ impl PlatformHandle {
 
 impl Drop for PlatformHandle {
     fn drop(&mut self) {
-        // SAFETY: `handle` is a valid open Win32 HANDLE obtained from
-        // `CreateFileMappingA` or `OpenFileMappingA` and has not been closed.
+        // SAFETY: `handle` is a valid open Win32 HANDLE that has not been
+        // closed yet.
         unsafe { let _ = CloseHandle(self.handle); }
     }
 }
 
-/// Strips the leading `/` from a POSIX-style name for use with Win32 APIs.
+/// Strips the leading `'/'` from a POSIX-style name for Win32 APIs.
 ///
-/// `/my_segment` → `"my_segment"`
+/// `"/my_segment"` → `"my_segment"`
 fn to_win32_name(name: &str) -> String {
     name.trim_start_matches('/').to_string()
 }

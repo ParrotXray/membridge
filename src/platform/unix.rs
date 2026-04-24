@@ -9,7 +9,7 @@ use crate::error::ShmError;
 
 /// POSIX shared memory handle (`shm_open` + `mmap`).
 pub struct PlatformHandle {
-    fd:   std::os::unix::io::OwnedFd,
+    fd: std::os::unix::io::OwnedFd,
     size: usize,
     name: String,
 }
@@ -81,7 +81,7 @@ impl PlatformHandle {
     /// `ptr` and `size` must come from a successful [`map`](Self::map) call
     /// on this handle and must not have been unmapped already.
     pub unsafe fn unmap(ptr: NonNull<u8>, size: usize) {
-        let _ = mman::munmap(ptr.cast::<std::ffi::c_void>(), size);
+        let _ = unsafe{ mman::munmap(ptr.cast::<std::ffi::c_void>(), size) };
     }
 
     /// Returns the total segment size in bytes.
