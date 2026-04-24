@@ -2,7 +2,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::ptr::NonNull;
 
+use pyo3::types::PyList;
+
 use crate::error::ShmError;
+use crate::mixed::{pack_mixed, unpack_mixed, schema_byte_size};
 use crate::rwlock::{ShmRwLock, ReadGuard, WriteGuard, RWLOCK_SIZE};
 
 /// A view into a shared memory segment with integrated cross-process rwlock.
@@ -38,11 +41,13 @@ use crate::rwlock::{ShmRwLock, ReadGuard, WriteGuard, RWLOCK_SIZE};
 #[pyclass]
 pub struct MappedView {
     /// Start of the region, including the rwlock header.
-    ptr:  NonNull<u8>,
+    ptr:    NonNull<u8>,
     /// Total region size in bytes, including the rwlock header.
-    size: usize,
+    size:   usize,
     /// Cross-process rwlock stored at `ptr + 0`.
-    lock: ShmRwLock,
+    lock:   ShmRwLock,
+    /// Auto-advance cursor for sequential writes (relative to data area).
+    cursor: std::sync::atomic::AtomicUsize,
 }
 
 // SAFETY: `MappedView` holds a raw pointer into a shared memory region managed
@@ -90,22 +95,146 @@ impl MappedView {
         Ok(PyBytes::new(py, slice))
     }
 
-    /// Writes `data` into the data area starting at `offset` under the write
-    /// lock.
+    /// Writes `data` into the data area under the write lock.
+    ///
+    /// - If `offset` is given, writes at that position and **does not** advance
+    ///   the cursor.
+    /// - If `offset` is omitted (`None`), writes at the current cursor position
+    ///   and advances the cursor by the number of bytes written.
+    ///
+    /// Accepted types: `bytes`, `bytearray`, `str` (UTF-8), `int` (i64),
+    /// `float` (f64), `bool` (1 byte).
     ///
     /// # Errors
     ///
-    /// Returns [`PyValueError`] if `data` is empty or
-    /// `offset + len(data) > data_size`.
-    pub fn write(&self, offset: usize, data: &[u8]) -> PyResult<()> {
-        self.check_bounds(offset, data.len())?;
+    /// Returns [`PyValueError`] if the write would exceed the data area.
+    #[pyo3(signature = (data, offset=None))]
+    pub fn write(&self, data: &Bound<'_, PyAny>, offset: Option<usize>) -> PyResult<()> {
+        use std::sync::atomic::Ordering;
+
+        let mut bytes: Vec<u8> = Vec::new();
+        crate::mixed::pack_value(data, &mut bytes)?;
+
+        let pos = match offset {
+            Some(o) => o,
+            None    => self.cursor.load(Ordering::Relaxed),
+        };
+
+        self.check_bounds(pos, bytes.len())?;
         let _guard = WriteGuard::new(&self.lock);
         unsafe {
             std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                self.data_ptr().add(offset),
-                data.len(),
+                bytes.as_ptr(),
+                self.data_ptr().add(pos),
+                bytes.len(),
             );
+        }
+
+        // Advance cursor only when offset was not given explicitly.
+        if offset.is_none() {
+            self.cursor.fetch_add(bytes.len(), Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+
+    /// Resets the auto-advance cursor to `pos` (default 0).
+    #[pyo3(signature = (pos=0))]
+    pub fn seek(&self, pos: usize) -> PyResult<()> {
+        if pos > self.data_size() {
+            return Err(ShmError::InvalidArg(format!(
+                "seek position {pos} exceeds data_size {}", self.data_size()
+            )).into());
+        }
+        self.cursor.store(pos, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Returns the current cursor position.
+    pub fn tell(&self) -> usize {
+        self.cursor.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Writes heterogeneous typed lists into the data area starting at `offset`.
+    ///
+    /// `items` must be a Python `list` of `(type_tag: str, values: list)` tuples.
+    ///
+    /// Supported tags: `"f32"`, `"f64"`, `"i32"`, `"i64"`, `"u8"`, `"u32"`,
+    /// `"u64"`, `"bool"`.
+    ///
+    /// Data is packed sequentially in native byte order.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// view.write_mixed(0, [
+    ///     ("f32",  [1.0, 2.5]),
+    ///     ("i64",  [100, 200]),
+    ///     ("bool", [True, False]),
+    /// ])
+    /// ```
+    /// Reads bytes from `offset` and unpacks them according to `schema`.
+    ///
+    /// `schema` is a `list` of `(type_tag, count)` tuples — the mirror image
+    /// of [`write_mixed`].
+    ///
+    /// Returns a `list` of `list`, one per schema entry.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// labels, scores, flags = view.read_mixed(0, [
+    ///     ("str16", 3),
+    ///     ("f32",   3),
+    ///     ("bool",  3),
+    /// ])
+    /// ```
+    /// If `offset` is omitted, reads from the current cursor position and advances it.
+    #[pyo3(signature = (schema, offset=None))]
+    pub fn read_mixed<'py>(
+        &self,
+        py: Python<'py>,
+        schema: &Bound<'py, PyList>,
+        offset: Option<usize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        use std::sync::atomic::Ordering;
+        let total = schema_byte_size(schema)?;
+        let pos = match offset {
+            Some(o) => o,
+            None    => self.cursor.load(Ordering::Relaxed),
+        };
+        self.check_bounds(pos, total)?;
+        let _guard = ReadGuard::new(&self.lock);
+        let data = unsafe {
+            std::slice::from_raw_parts(self.data_ptr().add(pos), total)
+        };
+        let result = unpack_mixed(py, data, schema)?;
+        if offset.is_none() {
+            self.cursor.fetch_add(total, Ordering::Relaxed);
+        }
+        Ok(result)
+    }
+
+    /// If `offset` is omitted, writes at the current cursor position and advances it.
+    #[pyo3(signature = (items, offset=None))]
+    pub fn write_mixed(&self, items: &Bound<'_, PyList>, offset: Option<usize>) -> PyResult<()> {
+        use std::sync::atomic::Ordering;
+        let bytes = pack_mixed(items)?;
+        let pos = match offset {
+            Some(o) => o,
+            None    => self.cursor.load(Ordering::Relaxed),
+        };
+        self.check_bounds(pos, bytes.len())?;
+        let _guard = WriteGuard::new(&self.lock);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.data_ptr().add(pos),
+                bytes.len(),
+            );
+        }
+        if offset.is_none() {
+            self.cursor.fetch_add(bytes.len(), Ordering::Relaxed);
         }
         Ok(())
     }
@@ -170,7 +299,12 @@ impl MappedView {
         if is_creator {
             lock.init();
         }
-        Ok(MappedView { ptr, size, lock })
+        Ok(MappedView {
+            ptr,
+            size,
+            lock,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        })
     }
 
     /// Returns a pointer to the start of the user data area (after the header).

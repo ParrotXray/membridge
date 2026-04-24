@@ -1,3 +1,5 @@
+from typing import Any
+
 class SharedMemory:
     """
     A handle to a named cross-platform shared memory segment.
@@ -14,20 +16,13 @@ class SharedMemory:
     character, e.g. ``"/my_segment"``.
     """
 
-    def __init__(self) -> None: ...  # not constructable directly; use create / open
-
     @staticmethod
     def create(name: str, size: int) -> "SharedMemory":
         """
         Create a new named shared memory segment of ``size`` bytes.
 
-        The first process to call this becomes the *creator*. When the
-        returned handle is used to call :meth:`map`, the
-        :class:`ShmRwLock` header is initialised to the unlocked state.
-
         :param name: Segment name, must start with ``'/'``.
-        :param size: Total size in bytes. Must be greater than 0 and greater
-                     than 4 (the rwlock header occupies the first 4 bytes).
+        :param size: Total size in bytes. Must be > 4 (rwlock header = 4 bytes).
         :raises ValueError: If ``size == 0`` or ``name`` is invalid.
         :raises OSError: On OS-level failure.
         """
@@ -38,15 +33,12 @@ class SharedMemory:
         """
         Open an existing named shared memory segment.
 
-        On **Unix** ``size`` is read automatically from ``fstat`` and may
-        be omitted. On **Windows** ``size`` must be supplied explicitly and
-        must match the value used at creation time (Win32 does not expose
-        the segment size through the mapping handle).
+        On **Unix** ``size`` is read automatically via ``fstat`` and may be
+        omitted. On **Windows** ``size`` must be supplied explicitly.
 
         :param name: Segment name, must start with ``'/'``.
         :param size: Required on Windows; ignored on Unix.
-        :raises ValueError: If ``name`` is invalid, or ``size`` is omitted
-                            on Windows.
+        :raises ValueError: If ``name`` is invalid or ``size`` is omitted on Windows.
         :raises OSError: If the segment does not exist or the call fails.
         """
         ...
@@ -55,10 +47,6 @@ class SharedMemory:
     def remove(name: str) -> None:
         """
         Remove the named segment (Unix: ``shm_unlink``; Windows: no-op).
-
-        On Unix, processes that already have the segment mapped may continue
-        to use their :class:`MappedView` instances; the kernel reclaims the
-        backing memory only after the last mapping is released.
 
         :param name: Segment name, must start with ``'/'``.
         :raises ValueError: If ``name`` is invalid.
@@ -70,15 +58,9 @@ class SharedMemory:
         """
         Map the entire segment into the calling process's address space.
 
-        Returns a :class:`MappedView` backed by the shared memory region.
-        Writes are immediately visible to all other processes that have
-        mapped the same segment.
+        On the creator side, the rwlock header is initialised to unlocked.
 
-        On Unix, ``munmap`` is called automatically when the view is
-        garbage-collected. On Windows, ``UnmapViewOfFile`` is called instead.
-
-        :raises ValueError: If the segment is too small to hold the 4-byte
-                            rwlock header.
+        :raises ValueError: If the segment is too small for the rwlock header.
         :raises OSError: On mapping failure.
         """
         ...
@@ -104,58 +86,108 @@ class MappedView:
         [ ShmRwLock (4 B) | user data (size - 4 B) ]
           offset 0          all public offsets start here
 
-    All ``offset`` arguments are relative to the start of the **data area**
-    (i.e. after the 4-byte rwlock header).
+    **Auto-advance cursor**
 
-    **Locking**
+    :meth:`write` and :meth:`write_mixed` accept an optional ``offset``
+    argument. When omitted, they write at the current cursor position and
+    advance it automatically. Use :meth:`seek` and :meth:`tell` to control
+    the cursor.
 
-    - :meth:`read` and :meth:`read_range` acquire the *shared read lock* for
-      their duration — multiple readers may proceed concurrently.
-    - :meth:`write` and :meth:`zero` acquire the *exclusive write lock* —
-      all readers and other writers are blocked until the call returns.
+    **Accepted types for** :meth:`write`
 
-    Locks are released automatically; no explicit unlock is needed.
+    | Python type  | Stored as              | Bytes        |
+    |--------------|------------------------|--------------|
+    | ``bool``     | ``u8`` (0 or 1)        | 1            |
+    | ``int``      | ``i64``                | 8            |
+    | ``float``    | ``f64``                | 8            |
+    | ``str``      | ``u32`` len + UTF-8    | 4 + len(str) |
+    | ``bytes``    | raw bytes              | len          |
+    | ``bytearray``| raw bytes              | len          |
 
-    **Cross-process safety**
+    **Schema tags for** :meth:`read_mixed`
 
-    The lock state lives inside the shared memory itself. Any process that
-    maps the same segment at offset 0 shares the same lock automatically.
-
-    **Drop behaviour**
-
-    The mapped region is unmapped (``munmap`` / ``UnmapViewOfFile``)
-    automatically when this object is garbage-collected.
+    ``"bool"``, ``"int"`` / ``"i64"``, ``"float"`` / ``"f64"``,
+    ``"f32"``, ``"i32"``, ``"u8"``, ``"u32"``, ``"u64"``, ``"str"``
     """
 
     def read(self) -> bytes:
-        """
-        Read the entire data area under the read lock.
-
-        :returns: A copy of all valid bytes as an immutable ``bytes`` object.
-        """
+        """Read the entire data area under the read lock."""
         ...
 
     def read_range(self, offset: int, length: int) -> bytes:
         """
-        Read ``length`` bytes starting at ``offset`` under the read lock.
+        Read ``length`` bytes at ``offset`` under the read lock.
 
-        :param offset: Byte offset into the data area (0-based).
-        :param length: Number of bytes to read. Must be greater than 0.
-        :returns: A copy of the requested bytes as an immutable ``bytes`` object.
-        :raises ValueError: If ``length == 0`` or ``offset + length`` exceeds
-                            the data area size.
+        :raises ValueError: If ``length == 0`` or range exceeds data area.
         """
         ...
 
-    def write(self, offset: int, data: bytes | bytearray) -> None:
+    def write(
+        self,
+        data: bool | int | float | str | bytes | bytearray,
+        offset: int | None = None,
+    ) -> None:
         """
-        Write ``data`` into the data area starting at ``offset`` under the
-        write lock.
+        Write ``data`` under the write lock.
 
-        :param offset: Byte offset into the data area (0-based).
-        :param data:   Bytes to write.
-        :raises ValueError: If ``data`` is empty or ``offset + len(data)``
-                            exceeds the data area size.
+        If ``offset`` is omitted, writes at the cursor and advances it.
+        If ``offset`` is given, writes there without moving the cursor.
+
+        :raises ValueError: If the write would exceed the data area.
+        """
+        ...
+
+    def write_mixed(
+        self,
+        items: list[Any],
+        offset: int | None = None,
+    ) -> None:
+        """
+        Pack and write a heterogeneous list under the write lock.
+
+        Each element of ``items`` can be:
+
+        - A plain value (``bool``, ``int``, ``float``, ``str``, ``bytes``) —
+          packed directly using the same rules as :meth:`write`.
+        - A nested ``list`` — each element is packed in order.
+
+        If ``offset`` is omitted, writes at the cursor and advances it.
+
+        Example::
+
+            view.write_mixed([
+                ["Normal", "DDoS", "DoS"],
+                [0.92, 0.87, 0.95],
+                [True, False, True],
+                42,
+            ])
+        """
+        ...
+
+    def read_mixed(
+        self,
+        schema: list[tuple[str, int]],
+        offset: int | None = None,
+    ) -> list[Any]:
+        """
+        Read and unpack data according to ``schema`` under the read lock.
+
+        ``schema`` is a list of ``(type_tag, count)`` tuples. When
+        ``count == 1`` the corresponding element is a scalar; otherwise a
+        list.
+
+        If ``offset`` is omitted, reads from the cursor and advances it.
+
+        Example::
+
+            msg, count, labels, scores = view.read_mixed([
+                ("str",   1),
+                ("int",   1),
+                ("str",   3),
+                ("float", 3),
+            ])
+
+        :raises ValueError: If the data area would be exceeded.
         """
         ...
 
@@ -163,12 +195,20 @@ class MappedView:
         """Zero the entire data area under the write lock."""
         ...
 
-    def reader_count(self) -> int:
+    def seek(self, pos: int = 0) -> None:
         """
-        Return the number of processes/threads currently holding the read lock.
+        Set the auto-advance cursor to ``pos`` (default 0).
 
-        Returns ``0`` if a writer holds the lock.
+        :raises ValueError: If ``pos`` exceeds the data area size.
         """
+        ...
+
+    def tell(self) -> int:
+        """Return the current cursor position."""
+        ...
+
+    def reader_count(self) -> int:
+        """Return the number of active readers (0 if a writer holds the lock)."""
         ...
 
     def is_write_locked(self) -> bool:
@@ -176,11 +216,7 @@ class MappedView:
         ...
 
     def size(self) -> int:
-        """
-        Return the usable data area size in bytes.
-
-        Equal to the total segment size minus 4 (the rwlock header).
-        """
+        """Return the usable data area size (total size minus 4-byte rwlock header)."""
         ...
 
     def __repr__(self) -> str: ...

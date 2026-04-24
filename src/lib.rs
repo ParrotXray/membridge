@@ -53,6 +53,7 @@
 //! ```
 
 mod error;
+mod mixed;
 mod platform;
 mod rwlock;
 mod mapped_view;
