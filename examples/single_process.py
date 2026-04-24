@@ -4,43 +4,39 @@ SHM_NAME = "/membridge_single"
 SHM_SIZE = 1024
 
 mem    = membridge.SharedMemory.create(SHM_NAME, SHM_SIZE)
-view_a = mem.map()
-view_b = mem.map()
+view_w = mem.map()   # writer — cursor starts at 0
+view_r = mem.map()   # reader — independent cursor, also starts at 0
 
-# ── write / read via cursor ──
-view_a.seek()
-view_a.write("hello")
-view_a.write(99)
-view_a.write(1.5)
-view_a.write(False)
-print(f"[a] cursor after writes: {view_a.tell()}")
+# ── write then read ──
+view_w.write("hello")
+view_w.write(99)
+view_w.write(1.5)
+view_w.write(False)
 
-view_b.seek()
-text, num, flt, flag = view_b.read_mixed([
-    ("str",   1),
-    ("int",   1),
-    ("float", 1),
-    ("bool",  1),
-])
-print(f"[b] text={text}  num={num}  flt={flt}  flag={flag}")
+print(f"str:   {view_r.read('str')}")
+print(f"int:   {view_r.read('int')}")
+print(f"float: {view_r.read('float')}")
+print(f"bool:  {view_r.read('bool')}")
 
 # ── write_mixed / read_mixed ──
-view_a.write_mixed([
+view_w.write_mixed([
     ["Normal", "DDoS", "DoS"],
     [0.9, 0.8, 0.7],
     [True, False, True],
 ])
 
-labels, scores, flags = view_b.read_mixed([
+labels, scores, flags = view_r.read_mixed([
     ("str",   3),
     ("float", 3),
     ("bool",  3),
 ])
-print(f"[b] labels={labels}  scores={scores}  flags={flags}")
+print(f"labels: {labels}")
+print(f"scores: {scores}")
+print(f"flags:  {flags}")
 
 # ── zero ──
-view_a.zero()
-print(f"[b] after zero: {view_b.read_range(0, 4)}")
+view_w.zero()
+print(f"after zero: {view_r.read_range(0, 4)}")
 
 membridge.SharedMemory.remove(SHM_NAME)
 print("done.")

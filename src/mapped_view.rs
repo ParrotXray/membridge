@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use pyo3::types::PyList;
 
 use crate::error::ShmError;
-use crate::mixed::{pack_mixed, unpack_mixed, schema_byte_size};
+use crate::mixed::{pack_mixed, unpack_mixed, unpack_one, schema_byte_size};
 use crate::rwlock::{ShmRwLock, ReadGuard, WriteGuard, RWLOCK_SIZE};
 
 /// A view into a shared memory segment with integrated cross-process rwlock.
@@ -66,7 +66,7 @@ unsafe impl Sync for MappedView {}
 impl MappedView {
     /// Reads the entire data area under the read lock and returns it as
     /// [`bytes`].
-    pub fn read<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    pub fn read_all<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let _guard = ReadGuard::new(&self.lock);
         let slice = unsafe {
             std::slice::from_raw_parts(self.data_ptr(), self.data_size())
@@ -153,6 +153,42 @@ impl MappedView {
     /// Returns the current cursor position.
     pub fn tell(&self) -> usize {
         self.cursor.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reads one value from the cursor position and advances the cursor.
+    ///
+    /// Mirrors :meth:`write` — use the same type tag that corresponds to what
+    /// was written.
+    ///
+    /// Supported tags: ``"bool"``, ``"int"`` / ``"i64"``, ``"float"`` /
+    /// ``"f64"``, ``"f32"``, ``"i32"``, ``"u8"``, ``"u32"``, ``"u64"``,
+    /// ``"str"``.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// view.seek()
+    /// view.write("hello")
+    /// view.write(42)
+    /// view.write(True)
+    ///
+    /// view.seek()
+    /// msg  = view.read_one("str")    # → "hello"
+    /// num  = view.read_one("int")    # → 42
+    /// flag = view.read_one("bool")   # → True
+    /// ```
+    pub fn read<'py>(&self, py: Python<'py>, tag: &str) -> PyResult<Py<PyAny>> {
+        use std::sync::atomic::Ordering;
+
+        let pos = self.cursor.load(Ordering::Relaxed);
+        let _guard = ReadGuard::new(&self.lock);
+        let (value, bytes_read) = unpack_one(
+            py,
+            unsafe { std::slice::from_raw_parts(self.data_ptr().add(pos), self.data_size() - pos) },
+            tag,
+        )?;
+        self.cursor.fetch_add(bytes_read, Ordering::Relaxed);
+        Ok(value)
     }
 
     /// Writes heterogeneous typed lists into the data area starting at `offset`.

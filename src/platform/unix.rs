@@ -9,7 +9,7 @@ use crate::error::ShmError;
 
 /// POSIX shared memory handle (`shm_open` + `mmap`).
 pub struct PlatformHandle {
-    fd: std::os::unix::io::OwnedFd,
+    fd:   std::os::unix::io::OwnedFd,
     size: usize,
     name: String,
 }
@@ -22,34 +22,29 @@ impl PlatformHandle {
             name,
             OFlag::O_CREAT | OFlag::O_RDWR,
             Mode::from_bits_truncate(0o666),
-        )
-        .map_err(ShmError::from)?;
+        ).map_err(ShmError::from)?;
 
         ftruncate(&fd, size as i64).map_err(|e| {
             let _ = mman::shm_unlink(name);
             ShmError::from(e)
         })?;
 
-        Ok(PlatformHandle {
-            fd,
-            size,
-            name: name.to_string(),
-        })
+        Ok(PlatformHandle { fd, size, name: name.to_string() })
     }
 
     /// Opens an existing named segment via `shm_open(O_RDWR)`. Uses `fstat`
     /// to read the segment size.
     pub fn open(name: &str) -> Result<Self, ShmError> {
-        let fd = mman::shm_open(name, OFlag::O_RDWR, Mode::empty()).map_err(ShmError::from)?;
+        let fd = mman::shm_open(
+            name,
+            OFlag::O_RDWR,
+            Mode::empty(),
+        ).map_err(ShmError::from)?;
 
         let stat = nix::sys::stat::fstat(&fd).map_err(ShmError::from)?;
         let size = stat.st_size as usize;
 
-        Ok(PlatformHandle {
-            fd,
-            size,
-            name: name.to_string(),
-        })
+        Ok(PlatformHandle { fd, size, name: name.to_string() })
     }
 
     /// Unlinks the named segment via `shm_unlink`.
@@ -72,8 +67,7 @@ impl PlatformHandle {
                 MapFlags::MAP_SHARED,
                 &self.fd,
                 0,
-            )
-            .map_err(ShmError::from)?
+            ).map_err(ShmError::from)?
         };
 
         // mmap returns NonNull<c_void>; reinterpret as NonNull<u8>.
@@ -88,9 +82,7 @@ impl PlatformHandle {
     /// on this handle and must not have been unmapped already.
     pub unsafe fn unmap(ptr: NonNull<u8>, size: usize) {
         // SAFETY: caller guarantees ptr is a valid mapped address.
-        unsafe {
-            let _ = mman::munmap(ptr.cast::<std::ffi::c_void>(), size);
-        }
+        unsafe { let _ = mman::munmap(ptr.cast::<std::ffi::c_void>(), size); }
     }
 
     /// Returns the total segment size in bytes.

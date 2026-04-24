@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use crate::error::ShmError;
 use crate::mapped_view::MappedView;
 use crate::platform::PlatformHandle;
+use crate::spsc::SpscRingBuffer;
 
 /// A handle to a named cross-platform shared memory segment.
 ///
@@ -125,6 +126,19 @@ impl SharedMemory {
     /// Returns the total segment size in bytes.
     pub fn size(&self) -> usize {
         self.handle.size()
+    }
+
+    /// Creates a :class:`SpscRingBuffer` view over the entire segment.
+    ///
+    /// The segment size minus :data:`SPSC_HEADER_SIZE` (24 bytes) must be a
+    /// **power of two** (e.g. 4096 - 24 = 4072 is not; use 4096 + 24 = 4120,
+    /// or simply allocate a power-of-two size + 24).
+    ///
+    /// :raises ValueError: If the data capacity is not a power of two.
+    pub fn spsc(&self) -> PyResult<SpscRingBuffer> {
+        let ptr = self.handle.map().map_err(PyErr::from)?;
+        SpscRingBuffer::new(ptr, self.handle.size(), self.is_creator)?;
+        Ok(SpscRingBuffer::from_ptr(ptr, self.handle.size()))
     }
 
     fn __repr__(&self) -> String {

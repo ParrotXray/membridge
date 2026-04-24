@@ -55,6 +55,7 @@
 mod error;
 mod mixed;
 mod platform;
+mod spsc;
 mod rwlock;
 mod mapped_view;
 mod shared_memory;
@@ -62,6 +63,7 @@ mod shared_memory;
 pub use error::ShmError;
 pub use mapped_view::MappedView;
 pub use shared_memory::SharedMemory;
+pub use spsc::SpscRingBuffer;
 
 use pyo3::prelude::*;
 
@@ -69,5 +71,6 @@ use pyo3::prelude::*;
 fn membridge(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SharedMemory>()?;
     m.add_class::<MappedView>()?;
+    m.add_class::<SpscRingBuffer>()?;
     Ok(())
 }

@@ -54,6 +54,16 @@ class SharedMemory:
         """
         ...
 
+    def spsc(self) -> "SpscRingBuffer":
+        """
+        Create a :class:`SpscRingBuffer` view over the entire segment.
+
+        The segment size minus 24 bytes (header) must be a power of two.
+
+        :raises ValueError: If the data capacity is not a power of two.
+        """
+        ...
+
     def map(self) -> "MappedView":
         """
         Map the entire segment into the calling process's address space.
@@ -110,8 +120,32 @@ class MappedView:
     ``"f32"``, ``"i32"``, ``"u8"``, ``"u32"``, ``"u64"``, ``"str"``
     """
 
-    def read(self) -> bytes:
+    def read_all(self) -> bytes:
         """Read the entire data area under the read lock."""
+        ...
+
+    def read(self, tag: str) -> bool | int | float | str | bytes:
+        """
+        Read one value at the cursor position and advance it.
+
+        Mirrors :meth:`write` — use the same tag as when writing.
+
+        Supported tags: ``"bool"``, ``"int"``, ``"float"``, ``"f32"``,
+        ``"f64"``, ``"i32"``, ``"i64"``, ``"u8"``, ``"u32"``, ``"u64"``,
+        ``"str"``.
+
+        Example::
+
+            view.seek()
+            view.write("hello")
+            view.write(42)
+            view.write(True)
+
+            view.seek()
+            msg  = view.read("str")    # → "hello"
+            num  = view.read("int")    # → 42
+            flag = view.read("bool")   # → True
+        """
         ...
 
     def read_range(self, offset: int, length: int) -> bytes:
@@ -217,6 +251,115 @@ class MappedView:
 
     def size(self) -> int:
         """Return the usable data area size (total size minus 4-byte rwlock header)."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class SpscRingBuffer:
+    """
+    A lock-free single-producer / single-consumer ring buffer stored inside
+    shared memory.
+
+    Each message is prefixed with a 4-byte length field so the consumer
+    knows how many bytes to read back as a complete unit.
+
+    **Memory layout**::
+
+        [ head (8 B) | tail (8 B) | capacity (8 B) | data (capacity B) ]
+
+    **Cross-platform**: uses only ``AtomicUsize`` and raw memory — no OS
+    primitives. Works identically on Windows and Unix.
+
+    **Constraint**: the data capacity (``size - 24``) must be a power of two.
+    Use ``size = N + 24`` where N is a power of two (e.g. 1024, 4096, 65536).
+
+    Obtain via :meth:`SharedMemory.spsc`.
+
+    **Accepted types for** :meth:`push`
+
+    | Python type  | Stored as              | Bytes        |
+    |--------------|------------------------|--------------|
+    | ``bool``     | ``u8`` (0 or 1)        | 1            |
+    | ``int``      | ``i64``                | 8            |
+    | ``float``    | ``f64``                | 8            |
+    | ``str``      | ``u32`` len + UTF-8    | 4 + len(str) |
+    | ``bytes``    | raw bytes              | len          |
+    | ``bytearray``| raw bytes              | len          |
+    | ``list``     | each element packed    | sum of above |
+    """
+
+    def push(
+        self,
+        data: bool | int | float | str | bytes | bytearray | list,
+    ) -> bool:
+        """
+        Write one message into the ring buffer.
+
+        :param data: Value to push. A ``list`` packs each element in order.
+        :returns: ``True`` if written, ``False`` if the buffer is full
+                  (back-pressure signal — retry later).
+        :raises ValueError: If the packed message is larger than the total
+                            buffer capacity (message can never fit).
+        """
+        ...
+
+    def pop(self, tag: str | None = None) -> bool | int | float | str | bytes | None:
+        """
+        Read one message from the ring buffer.
+
+        - If ``tag`` is ``None``, returns the raw ``bytes``.
+        - If ``tag`` is given (e.g. ``"str"``, ``"int"``), unpacks the bytes
+          and returns the typed value.
+
+        Supported tags: ``"bool"``, ``"int"`` / ``"i64"``, ``"float"`` /
+        ``"f64"``, ``"f32"``, ``"i32"``, ``"u8"``, ``"u32"``, ``"u64"``,
+        ``"str"``.
+
+        :returns: The value, or ``None`` if the buffer is empty.
+        """
+        ...
+
+    def pop_mixed(
+        self,
+        schema: list[tuple[str, int]],
+    ) -> list | None:
+        """
+        Read one message and unpack it according to ``schema``.
+
+        Mirrors :meth:`push` for list values.
+
+        :returns: A list of unpacked values, or ``None`` if the buffer is empty.
+
+        Example::
+
+            ring.push(["Normal", 0.92, True])
+            label, score, flag = ring.pop_mixed([
+                ("str",   1),
+                ("float", 1),
+                ("bool",  1),
+            ])
+        """
+        ...
+
+    def used(self) -> int:
+        """Return the number of bytes currently used in the buffer."""
+        ...
+
+    def free(self) -> int:
+        """Return the number of free bytes remaining."""
+        ...
+
+    def capacity(self) -> int:
+        """Return the total data capacity in bytes (excluding the 24-byte header)."""
+        ...
+
+    def is_empty(self) -> bool:
+        """Return ``True`` if the buffer contains no messages."""
+        ...
+
+    def is_full(self) -> bool:
+        """Return ``True`` if the buffer has no free space."""
         ...
 
     def __repr__(self) -> str: ...

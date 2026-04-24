@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyByteArray, PyList, PyTuple};
 
 use crate::error::ShmError;
 
@@ -66,7 +66,9 @@ pub fn unpack_mixed<'py>(
             ($size:expr, $t:ty) => {{
                 for _ in 0..count {
                     check_bounds(cursor, $size, data.len())?;
-                    let v = <$t>::from_ne_bytes(data[cursor..cursor + $size].try_into().unwrap());
+                    let v = <$t>::from_ne_bytes(
+                        data[cursor..cursor + $size].try_into().unwrap()
+                    );
                     group.append(v)?;
                     cursor += $size;
                 }
@@ -81,28 +83,29 @@ pub fn unpack_mixed<'py>(
                     cursor += 1;
                 }
             }
-            "int" | "i64" => read_fixed!(8, i64),
+            "int"   | "i64" => read_fixed!(8, i64),
             "float" | "f64" => read_fixed!(8, f64),
-            "f32" => read_fixed!(4, f32),
-            "i32" => read_fixed!(4, i32),
-            "u8" => {
+            "f32"  => read_fixed!(4, f32),
+            "i32"  => read_fixed!(4, i32),
+            "u8"   => {
                 for _ in 0..count {
                     check_bounds(cursor, 1, data.len())?;
                     group.append(data[cursor])?;
                     cursor += 1;
                 }
             }
-            "u32" => read_fixed!(4, u32),
-            "u64" => read_fixed!(8, u64),
-            "str" => {
+            "u32"  => read_fixed!(4, u32),
+            "u64"  => read_fixed!(8, u64),
+            "str"  => {
                 // Length-prefixed UTF-8
                 for _ in 0..count {
                     check_bounds(cursor, 4, data.len())?;
-                    let len =
-                        u32::from_ne_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+                    let len = u32::from_ne_bytes(
+                        data[cursor..cursor+4].try_into().unwrap()
+                    ) as usize;
                     cursor += 4;
                     check_bounds(cursor, len, data.len())?;
-                    let s = String::from_utf8_lossy(&data[cursor..cursor + len]);
+                    let s = String::from_utf8_lossy(&data[cursor..cursor+len]);
                     group.append(s.as_ref())?;
                     cursor += len;
                 }
@@ -128,8 +131,7 @@ fn check_bounds(cursor: usize, needed: usize, total: usize) -> PyResult<()> {
     if cursor + needed > total {
         Err(ShmError::InvalidArg(format!(
             "out of bounds: cursor={cursor} + needed={needed} > data_len={total}"
-        ))
-        .into())
+        )).into())
     } else {
         Ok(())
     }
@@ -146,7 +148,7 @@ fn check_bounds(cursor: usize, needed: usize, total: usize) -> PyResult<()> {
 /// | `bytes`     | raw bytes  | len |
 /// | `bytearray` | raw bytes  | len |
 pub fn pack_value(v: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
-    use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+    use pyo3::types::{PyBool, PyInt, PyFloat, PyString};
 
     if v.cast::<PyBool>().is_ok() {
         // Must check bool before int (bool is a subclass of int).
@@ -168,8 +170,7 @@ pub fn pack_value(v: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
         return Err(ShmError::InvalidArg(format!(
             "unsupported type '{}'; supported: bool, int, float, str, bytes, bytearray",
             v.get_type().name()?
-        ))
-        .into());
+        )).into());
     }
     Ok(())
 }
@@ -206,6 +207,95 @@ pub fn pack_mixed(items: &Bound<'_, PyList>) -> PyResult<Vec<u8>> {
     }
 
     Ok(out)
+}
+
+/// Reads one value from a byte slice according to `tag`.
+///
+/// Returns `(value, bytes_consumed)`.
+pub fn unpack_one(py: Python<'_>, data: &[u8], tag: &str) -> PyResult<(Py<PyAny>, usize)> {
+    macro_rules! read_fixed {
+        ($size:expr, $t:ty) => {{
+            if data.len() < $size {
+                return Err(ShmError::InvalidArg(format!(
+                    "not enough data to read '{tag}': need {}, have {}",
+                    $size, data.len()
+                )).into());
+            }
+            let v = <$t>::from_ne_bytes(data[..$size].try_into().unwrap());
+            (v.into_pyobject(py)?.into_any().unbind(), $size)
+        }};
+    }
+
+    let result = match tag {
+        "bool" => {
+            if data.is_empty() {
+                return Err(ShmError::InvalidArg("not enough data to read 'bool'".into()).into());
+            }
+            (pyo3::types::PyBool::new(py, data[0] != 0).as_any().clone().unbind(), 1)
+        }
+        "u8"            => read_fixed!(1, u8),
+        "f32" | "i32" | "u32" => {
+            if data.len() < 4 {
+                return Err(ShmError::InvalidArg(format!(
+                    "not enough data to read '{tag}': need 4, have {}", data.len()
+                )).into());
+            }
+            match tag {
+                "f32" => {
+                    let v = f32::from_ne_bytes(data[..4].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 4)
+                }
+                "i32" => {
+                    let v = i32::from_ne_bytes(data[..4].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 4)
+                }
+                _ => {
+                    let v = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 4)
+                }
+            }
+        }
+        "int" | "float" | "i64" | "f64" | "u64" => {
+            if data.len() < 8 {
+                return Err(ShmError::InvalidArg(format!(
+                    "not enough data to read '{tag}': need 8, have {}", data.len()
+                )).into());
+            }
+            match tag {
+                "float" | "f64" => {
+                    let v = f64::from_ne_bytes(data[..8].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 8)
+                }
+                "u64" => {
+                    let v = u64::from_ne_bytes(data[..8].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 8)
+                }
+                _ => {
+                    let v = i64::from_ne_bytes(data[..8].try_into().unwrap());
+                    (v.into_pyobject(py)?.into_any().clone().unbind(), 8)
+                }
+            }
+        }
+        "str" => {
+            if data.len() < 4 {
+                return Err(ShmError::InvalidArg("not enough data to read str length prefix".into()).into());
+            }
+            let len = u32::from_ne_bytes(data[..4].try_into().unwrap()) as usize;
+            if data.len() < 4 + len {
+                return Err(ShmError::InvalidArg(format!(
+                    "not enough data to read str payload: need {}, have {}", 4 + len, data.len()
+                )).into());
+            }
+            let s = String::from_utf8_lossy(&data[4..4 + len]).into_owned();
+            (s.into_pyobject(py)?.into_any().clone().unbind(), 4 + len)
+        }
+        other => {
+            return Err(ShmError::InvalidArg(format!(
+                "unknown type tag '{other}'; supported: bool, int, float, f32, f64, i32, i64, u8, u32, u64, str"
+            )).into());
+        }
+    };
+    Ok(result)
 }
 
 /// Computes the total byte size of a schema without reading any data.
