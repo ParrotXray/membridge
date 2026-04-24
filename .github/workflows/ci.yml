@@ -25,17 +25,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        id: setup-python
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          # --interpreter python3 tells maturin to use the host Python ABI
-          # for cross-compiled targets instead of searching inside the
-          # manylinux Docker container where no interpreter is available.
-          args: --release --out dist --interpreter python3
+          # Pass the exact interpreter path from setup-python so maturin
+          # can determine the version for cross-compiled targets running
+          # inside the manylinux Docker container.
+          args: --release --out dist --interpreter ${{ steps.setup-python.outputs.python-path }}
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
 
