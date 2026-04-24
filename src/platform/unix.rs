@@ -42,8 +42,7 @@ impl PlatformHandle {
     pub fn open(name: &str) -> Result<Self, ShmError> {
         let fd = mman::shm_open(name, OFlag::O_RDWR, Mode::empty()).map_err(ShmError::from)?;
 
-        use std::os::unix::io::AsRawFd;
-        let stat = nix::sys::stat::fstat(fd.as_raw_fd()).map_err(ShmError::from)?;
+        let stat = nix::sys::stat::fstat(&fd).map_err(ShmError::from)?;
         let size = stat.st_size as usize;
 
         Ok(PlatformHandle {
