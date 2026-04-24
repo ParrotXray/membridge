@@ -45,11 +45,12 @@ use crate::error::ShmError;
 ///     ("str16", 3),   # → ["Normal", "DDoS", "DoS"]
 /// ])
 /// ```
+/// Returns `(result_list, bytes_consumed)`.
 pub fn unpack_mixed<'py>(
     py: Python<'py>,
     data: &[u8],
     schema: &Bound<'py, PyList>,
-) -> PyResult<Bound<'py, PyList>> {
+) -> PyResult<(Bound<'py, PyList>, usize)> {
     let result = PyList::empty(py);
     let mut cursor = 0usize;
 
@@ -124,7 +125,7 @@ pub fn unpack_mixed<'py>(
         }
     }
 
-    Ok(result)
+    Ok((result, cursor))
 }
 
 fn check_bounds(cursor: usize, needed: usize, total: usize) -> PyResult<()> {
@@ -298,6 +299,85 @@ pub fn unpack_one(py: Python<'_>, data: &[u8], tag: &str) -> PyResult<(Py<PyAny>
     Ok(result)
 }
 
+/// Same as [`unpack_mixed`] but also returns the number of bytes consumed.
+///
+/// Used by [`MappedView::read_mixed`] to advance the cursor correctly,
+/// including for variable-length types like `"str"`.
+pub fn unpack_mixed_counted<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    schema: &Bound<'py, PyList>,
+) -> PyResult<(Bound<'py, PyList>, usize)> {
+    let result = PyList::empty(py);
+    let mut cursor = 0usize;
+
+    for item in schema.iter() {
+        let tuple = item.cast::<PyTuple>().map_err(|_| {
+            ShmError::InvalidArg("schema entries must be (type_tag, count) tuples".into())
+        })?;
+
+        let tag: String = tuple.get_item(0)?.extract()?;
+        let count = tuple.get_item(1)?.extract::<usize>()?;
+        let group = PyList::empty(py);
+
+        macro_rules! read_fixed {
+            ($size:expr, $t:ty) => {{
+                for _ in 0..count {
+                    check_bounds(cursor, $size, data.len())?;
+                    let v = <$t>::from_ne_bytes(
+                        data[cursor..cursor + $size].try_into().unwrap()
+                    );
+                    group.append(v)?;
+                    cursor += $size;
+                }
+            }};
+        }
+
+        match tag.as_str() {
+            "bool" => {
+                for _ in 0..count {
+                    check_bounds(cursor, 1, data.len())?;
+                    group.append(data[cursor] != 0)?;
+                    cursor += 1;
+                }
+            }
+            "u8"            => read_fixed!(1, u8),
+            "f32"           => read_fixed!(4, f32),
+            "i32"           => read_fixed!(4, i32),
+            "u32"           => read_fixed!(4, u32),
+            "int"  | "i64"  => read_fixed!(8, i64),
+            "float"| "f64"  => read_fixed!(8, f64),
+            "u64"           => read_fixed!(8, u64),
+            "str" => {
+                for _ in 0..count {
+                    check_bounds(cursor, 4, data.len())?;
+                    let len = u32::from_ne_bytes(
+                        data[cursor..cursor + 4].try_into().unwrap()
+                    ) as usize;
+                    cursor += 4;
+                    check_bounds(cursor, len, data.len())?;
+                    let s = String::from_utf8_lossy(&data[cursor..cursor + len]);
+                    group.append(s.as_ref())?;
+                    cursor += len;
+                }
+            }
+            other => {
+                return Err(ShmError::InvalidArg(format!(
+                    "unknown type tag '{other}'"
+                )).into());
+            }
+        }
+
+        if count == 1 {
+            result.append(group.get_item(0)?)?;
+        } else {
+            result.append(&group)?;
+        }
+    }
+
+    Ok((result, cursor))
+}
+
 /// Computes the total byte size of a schema without reading any data.
 ///
 /// Used by [`MappedView::read_mixed`] to validate bounds before reading.
@@ -316,9 +396,9 @@ pub fn schema_byte_size(schema: &Bound<'_, PyList>) -> PyResult<usize> {
             "f32"  | "i32" | "u32"          => 4,
             "float"| "f64" | "i64" | "u64"
             | "int"                         => 8,
-            "str" => return Err(ShmError::InvalidArg(
-                "schema_byte_size cannot compute size for 'str' (variable length);                  use read_range manually".into()
-            ).into()),
+            // str is variable length — return 0 as sentinel;
+            // read_mixed handles str dynamically without pre-checking bounds.
+            "str" => 0,
             other => return Err(ShmError::InvalidArg(
                 format!("unknown type tag '{other}'")
             ).into()),

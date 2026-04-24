@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::error::ShmError;
-use crate::mixed::{pack_value, unpack_one, unpack_mixed};
+use crate::mixed::{pack_value, unpack_one, unpack_mixed_counted};
 
 // ═══════════════════════════════════════════════════════════════
 //  Memory layout
@@ -208,7 +208,7 @@ impl SpscRingBuffer {
         let mut payload = vec![0u8; payload_len];
         self.read_bytes(head + 4, &mut payload, cap);
         self.head().store(head.wrapping_add(4 + payload_len), Ordering::Release);
-        let result = unpack_mixed(py, &payload, schema)?;
+        let (result, _) = unpack_mixed_counted(py, &payload, schema)?;
         Ok(Some(result))
     }
 

@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use pyo3::types::PyList;
 
 use crate::error::ShmError;
-use crate::mixed::{pack_mixed, unpack_mixed, unpack_one, schema_byte_size};
+use crate::mixed::{pack_mixed, unpack_mixed_counted, unpack_one};
 use crate::rwlock::{ShmRwLock, ReadGuard, WriteGuard, RWLOCK_SIZE};
 
 /// A view into a shared memory segment with integrated cross-process rwlock.
@@ -234,19 +234,27 @@ impl MappedView {
         offset: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         use std::sync::atomic::Ordering;
-        let total = schema_byte_size(schema)?;
         let pos = match offset {
             Some(o) => o,
             None    => self.cursor.load(Ordering::Relaxed),
         };
-        self.check_bounds(pos, total)?;
+        // Pass the entire remaining data area to unpack_mixed so it can
+        // handle variable-length types (e.g. str with length prefix).
+        // unpack_mixed returns (result, bytes_consumed) so we can advance
+        // the cursor correctly.
+        let available = self.data_size().saturating_sub(pos);
+        if available == 0 {
+            return Err(crate::error::ShmError::InvalidArg(
+                "read_mixed: no data available at current cursor position".into()
+            ).into());
+        }
         let _guard = ReadGuard::new(&self.lock);
         let data = unsafe {
-            std::slice::from_raw_parts(self.data_ptr().add(pos), total)
+            std::slice::from_raw_parts(self.data_ptr().add(pos), available)
         };
-        let result = unpack_mixed(py, data, schema)?;
+        let (result, bytes_read) = unpack_mixed_counted(py, data, schema)?;
         if offset.is_none() {
-            self.cursor.fetch_add(total, Ordering::Relaxed);
+            self.cursor.fetch_add(bytes_read, Ordering::Relaxed);
         }
         Ok(result)
     }
