@@ -3,131 +3,6 @@ use pyo3::types::{PyBytes, PyByteArray, PyList, PyTuple};
 
 use crate::error::ShmError;
 
-/// Converts a Python `list[("type", list[...])]` into a flat `Vec<u8>`.
-///
-/// Supported type tags:
-///
-/// | Tag      | Rust type | Bytes per element |
-/// |----------|-----------|-------------------|
-/// | `"f32"`  | `f32`     | 4 |
-/// | `"f64"`  | `f64`     | 8 |
-/// | `"i32"`  | `i32`     | 4 |
-/// | `"i64"`  | `i64`     | 8 |
-/// | `"u8"`   | `u8`      | 1 |
-/// | `"u32"`  | `u32`     | 4 |
-/// | `"u64"`  | `u64`     | 8 |
-/// | `"bool"` | `u8` (0/1)| 1 |
-///
-/// # Example (Python)
-///
-/// ```python
-/// buf = view.pack_mixed([
-///     ("f32",  [1.0, 2.5]),
-///     ("i64",  [100, 200]),
-///     ("bool", [True, False]),
-/// ])
-/// # buf is bytes; total size = 2*4 + 2*8 + 2*1 = 26 bytes
-/// ```
-/// Unpacks a flat byte slice back into a Python list of typed values.
-///
-/// `schema` is a Python `list` of `(type_tag, count)` tuples that describes
-/// the layout — the same tags used in [`pack_mixed`].
-///
-/// Returns a `list` of `list`, one inner list per schema entry.
-///
-/// # Example (Python)
-///
-/// ```python
-/// result = unpack_mixed(raw_bytes, [
-///     ("f32",   2),   # → [1.0, 2.5]
-///     ("i64",   2),   # → [100, 200]
-///     ("bool",  2),   # → [True, False]
-///     ("str16", 3),   # → ["Normal", "DDoS", "DoS"]
-/// ])
-/// ```
-/// Returns `(result_list, bytes_consumed)`.
-pub fn unpack_mixed<'py>(
-    py: Python<'py>,
-    data: &[u8],
-    schema: &Bound<'py, PyList>,
-) -> PyResult<(Bound<'py, PyList>, usize)> {
-    let result = PyList::empty(py);
-    let mut cursor = 0usize;
-
-    for item in schema.iter() {
-        let tuple = item.cast::<PyTuple>().map_err(|_| {
-            ShmError::InvalidArg("schema entries must be (type_tag, count) tuples".into())
-        })?;
-
-        let tag: String = tuple.get_item(0)?.extract()?;
-        let count = tuple.get_item(1)?.extract::<usize>()?;
-        let group = PyList::empty(py);
-
-        macro_rules! read_fixed {
-            ($size:expr, $t:ty) => {{
-                for _ in 0..count {
-                    check_bounds(cursor, $size, data.len())?;
-                    let v = <$t>::from_ne_bytes(
-                        data[cursor..cursor + $size].try_into().unwrap()
-                    );
-                    group.append(v)?;
-                    cursor += $size;
-                }
-            }};
-        }
-
-        match tag.as_str() {
-            "bool" => {
-                for _ in 0..count {
-                    check_bounds(cursor, 1, data.len())?;
-                    group.append(data[cursor] != 0)?;
-                    cursor += 1;
-                }
-            }
-            "int"   | "i64" => read_fixed!(8, i64),
-            "float" | "f64" => read_fixed!(8, f64),
-            "f32"  => read_fixed!(4, f32),
-            "i32"  => read_fixed!(4, i32),
-            "u8"   => {
-                for _ in 0..count {
-                    check_bounds(cursor, 1, data.len())?;
-                    group.append(data[cursor])?;
-                    cursor += 1;
-                }
-            }
-            "u32"  => read_fixed!(4, u32),
-            "u64"  => read_fixed!(8, u64),
-            "str"  => {
-                // Length-prefixed UTF-8
-                for _ in 0..count {
-                    check_bounds(cursor, 4, data.len())?;
-                    let len = u32::from_ne_bytes(
-                        data[cursor..cursor+4].try_into().unwrap()
-                    ) as usize;
-                    cursor += 4;
-                    check_bounds(cursor, len, data.len())?;
-                    let s = String::from_utf8_lossy(&data[cursor..cursor+len]);
-                    group.append(s.as_ref())?;
-                    cursor += len;
-                }
-            }
-            other => {
-                return Err(ShmError::InvalidArg(format!(
-                    "unknown type tag '{other}'; supported: bool, int, float, f32, f64, i32, i64, u8, u32, u64, str"
-                )).into());
-            }
-        }
-
-        if count == 1 {
-            result.append(group.get_item(0)?)?;
-        } else {
-            result.append(&group)?;
-        }
-    }
-
-    Ok((result, cursor))
-}
-
 fn check_bounds(cursor: usize, needed: usize, total: usize) -> PyResult<()> {
     if cursor + needed > total {
         Err(ShmError::InvalidArg(format!(
@@ -299,10 +174,49 @@ pub fn unpack_one(py: Python<'_>, data: &[u8], tag: &str) -> PyResult<(Py<PyAny>
     Ok(result)
 }
 
-/// Same as [`unpack_mixed`] but also returns the number of bytes consumed.
+/// Converts a Python `list[("type", list[...])]` into a flat `Vec<u8>`.
 ///
-/// Used by [`MappedView::read_mixed`] to advance the cursor correctly,
-/// including for variable-length types like `"str"`.
+/// Supported type tags:
+///
+/// | Tag      | Rust type | Bytes per element |
+/// |----------|-----------|-------------------|
+/// | `"f32"`  | `f32`     | 4 |
+/// | `"f64"`  | `f64`     | 8 |
+/// | `"i32"`  | `i32`     | 4 |
+/// | `"i64"`  | `i64`     | 8 |
+/// | `"u8"`   | `u8`      | 1 |
+/// | `"u32"`  | `u32`     | 4 |
+/// | `"u64"`  | `u64`     | 8 |
+/// | `"bool"` | `u8` (0/1)| 1 |
+///
+/// # Example (Python)
+///
+/// ```python
+/// buf = view.pack_mixed([
+///     ("f32",  [1.0, 2.5]),
+///     ("i64",  [100, 200]),
+///     ("bool", [True, False]),
+/// ])
+/// # buf is bytes; total size = 2*4 + 2*8 + 2*1 = 26 bytes
+/// ```
+/// Unpacks a flat byte slice back into a Python list of typed values.
+///
+/// `schema` is a Python `list` of `(type_tag, count)` tuples that describes
+/// the layout — the same tags used in [`pack_mixed`].
+///
+/// Returns a `list` of `list`, one inner list per schema entry.
+///
+/// # Example (Python)
+///
+/// ```python
+/// result = unpack_mixed_counted(raw_bytes, [
+///     ("f32",  2),   # → [1.0, 2.5]
+///     ("i64",  2),   # → [100, 200]
+///     ("bool", 2),   # → [True, False]
+///     ("str",  3),   # → ["Hello", "from", "producer"]
+/// ])
+/// ```
+/// Returns `(result_list, bytes_consumed)`.
 pub fn unpack_mixed_counted<'py>(
     py: Python<'py>,
     data: &[u8],
@@ -376,34 +290,4 @@ pub fn unpack_mixed_counted<'py>(
     }
 
     Ok((result, cursor))
-}
-
-/// Computes the total byte size of a schema without reading any data.
-///
-/// Used by [`MappedView::read_mixed`] to validate bounds before reading.
-pub fn schema_byte_size(schema: &Bound<'_, PyList>) -> PyResult<usize> {
-    let mut total = 0usize;
-    for item in schema.iter() {
-        let tuple = item.cast::<PyTuple>().map_err(|_| {
-            ShmError::InvalidArg("schema entries must be (type_tag, count) tuples".into())
-        })?;
-        let tag: String = tuple.get_item(0)?.extract()?;
-        let count = tuple.get_item(1)?.extract::<usize>()?;
-        // For "str" we cannot know the size without reading the data,
-        // so schema_byte_size is not supported for str columns.
-        let elem_size = match tag.as_str() {
-            "bool" | "u8"                   => 1,
-            "f32"  | "i32" | "u32"          => 4,
-            "float"| "f64" | "i64" | "u64"
-            | "int"                         => 8,
-            // str is variable length — return 0 as sentinel;
-            // read_mixed handles str dynamically without pre-checking bounds.
-            "str" => 0,
-            other => return Err(ShmError::InvalidArg(
-                format!("unknown type tag '{other}'")
-            ).into()),
-        };
-        total += elem_size * count;
-    }
-    Ok(total)
 }
