@@ -20,19 +20,19 @@ print(f"bool:  {view_r.read('bool')}")
 
 # ── write_mixed / read_mixed ──
 view_w.write_mixed([
-    ["Normal", "DDoS", "DoS"],
+    ["Hello", "from", "producer"],
     [0.9, 0.8, 0.7],
     [True, False, True],
 ])
 
-labels, scores, flags = view_r.read_mixed([
+arg1, arg2, arg3 = view_r.read_mixed([
     ("str",   3),
     ("float", 3),
     ("bool",  3),
 ])
-print(f"labels: {labels}")
-print(f"scores: {scores}")
-print(f"flags:  {flags}")
+print(f"labels: {arg1}")
+print(f"scores: {arg2}")
+print(f"flags:  {arg3}")
 
 # ── zero ──
 view_w.zero()

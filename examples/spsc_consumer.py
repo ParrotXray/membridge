@@ -32,8 +32,8 @@ while True:
     if result is not None:
         break
     time.sleep(0.01)
-label, score, flag = result
-print(f"[consumer] label={label}  score={score}  flag={flag}")
+arg1, arg2, arg3 = result
+print(f"[consumer] {arg1}, {arg2}, {arg3}")
 
 # ── sentinel ──
 while True:

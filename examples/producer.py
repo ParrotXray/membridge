@@ -19,7 +19,7 @@ view.write(42)
 view.write(3.14)
 view.write(True)
 view.write_mixed([
-    ["Normal", "DDoS", "DoS"],
+    ["Hello", "from", "producer"],
     [0.92, 0.87, 0.95],
     [True, False, True],
 ])

@@ -27,9 +27,9 @@ while not ring.push([1.0, 2.0, 3.0]):
 print("[producer] pushed floats: [1.0, 2.0, 3.0]")
 
 # ── push mixed ──
-while not ring.push(["Normal", 0.92, True]):
+while not ring.push(["Hello", 0.92, True]):
     time.sleep(0.01)
-print("[producer] pushed mixed: ['Normal', 0.92, True]")
+print("[producer] pushed mixed: ['Hello', 0.92, True]")
 
 # ── sentinel ──
 while not ring.push("__EOF__"):

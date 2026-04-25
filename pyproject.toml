@@ -4,9 +4,39 @@ build-backend = "maturin"
 
 [project]
 name = "membridge"
-version = "0.1.3"
+version = "1.0.0"
+description = "Cross-platform, cross-process shared memory with rwlock and SPSC ring buffer for Python, powered by Rust"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["shared-memory", "ipc", "rust", "pyo3", "ring-buffer", "rwlock"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: System :: Hardware",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/ParrotXray/membridge"
+Repository = "https://github.com/ParrotXray/membridge"
+Issues = "https://github.com/ParrotXray/membridge/issues"
 
 [tool.maturin]
+python-source = "."
 include = [
-    { path = "membridge.pyi", format = "wheel" }
+    { path = "membridge.pyi", format = "wheel" },
+    { path = "README.md",     format = "sdist" },
 ]
