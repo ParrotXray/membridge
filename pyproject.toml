@@ -35,7 +35,6 @@ Repository = "https://github.com/ParrotXray/membridge"
 Issues = "https://github.com/ParrotXray/membridge/issues"
 
 [tool.maturin]
-python-source = "."
 include = [
     { path = "membridge.pyi", format = "wheel" },
     { path = "README.md",     format = "sdist" },

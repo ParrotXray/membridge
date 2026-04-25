@@ -79,7 +79,7 @@ mem  = membridge.SharedMemory.create("/spsc", 1024 + 24)
 ring = mem.spsc()
 
 ring.push("msg-0")
-ring.push(["Normal", 0.92, True])   # heterogeneous list in one message
+ring.push(["Hello", 0.92, True])   # heterogeneous list in one message
 ring.push("__EOF__")
 ```
 
